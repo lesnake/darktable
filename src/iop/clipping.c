@@ -35,6 +35,7 @@
 #include "gui/presets.h"
 #include "iop/iop_api.h"
 #include "common/iop_group.h"
+#include "dtgtk/expander.h"
 
 #include <assert.h>
 #include <gdk/gdkkeysyms.h>
@@ -47,6 +48,8 @@
 DT_MODULE_INTROSPECTION(5, dt_iop_clipping_params_t)
 
 #define CLAMPF(a, mn, mx) ((a) < (mn) ? (mn) : ((a) > (mx) ? (mx) : (a)))
+
+#define EXPORT_MAX_IMAGE_SIZE UINT16_MAX
 
 /** flip H/V, rotate an image, then clip the buffer. */
 typedef enum dt_iop_clipping_flags_t
@@ -216,6 +219,11 @@ typedef struct dt_iop_clipping_gui_data_t
 
   GtkWidget *keystone_type;
   GtkWidget *crop_auto;
+
+  GtkWidget *numcrop_toggle;
+  GtkWidget *numcrop_expander;
+  GtkWidget *W_crop_keep_centered;
+  GtkSpinButton *W_clip_x, *W_clip_y, *W_clip_w, *W_clip_h;
 
   float button_down_x, button_down_y;
   float button_down_zoom_x, button_down_zoom_y,
@@ -1510,6 +1518,14 @@ static void aspect_presets_changed(GtkWidget *combo, dt_iop_module_t *self)
     apply_box_aspect(self, GRAB_HORIZONTAL);
     dt_control_queue_redraw_center();
   }
+
+  // Inhibit numeric crop height control because it is calculated from width and the ratios
+  // when an aspect is selected
+  if ( d == 0 && n == 0 )
+  	gtk_widget_set_sensitive (GTK_WIDGET(g->W_clip_h), TRUE);
+  else
+  	gtk_widget_set_sensitive (GTK_WIDGET(g->W_clip_h), FALSE);
+
 }
 
 static void angle_callback(GtkWidget *slider, dt_iop_module_t *self)
@@ -1528,6 +1544,10 @@ void gui_reset(struct dt_iop_module_t *self)
   dt_conf_set_int("plugins/darkroom/clipping/ratio_d", 0);
   dt_conf_set_int("plugins/darkroom/clipping/ratio_n", 0);
   g->k_show = -1;
+  dtgtk_expander_set_expanded(DTGTK_EXPANDER(g->numcrop_expander),FALSE);
+  dtgtk_togglebutton_set_paint(DTGTK_TOGGLEBUTTON(g->numcrop_toggle), dtgtk_cairo_paint_solid_arrow,
+                               CPF_DO_NOT_USE_BORDER | CPF_STYLE_BOX | CPF_DIRECTION_LEFT, NULL);
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g->numcrop_toggle), FALSE);
 }
 
 static void keystone_type_changed(GtkWidget *combo, dt_iop_module_t *self)
@@ -1598,6 +1618,7 @@ void gui_update(struct dt_iop_module_t *self)
 {
   dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
   dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self->params;
+  dt_develop_t *dev = self->dev;
 
   /* update ui elements */
   dt_bauhaus_slider_set(g->angle, -p->angle);
@@ -1681,6 +1702,19 @@ void gui_update(struct dt_iop_module_t *self)
   g->clip_h = fabsf(p->ch) - p->cy;
 
   dt_bauhaus_combobox_set(g->crop_auto, p->crop_auto);
+
+  int procw, proch;
+  dt_dev_get_processed_size(dev, &procw, &proch);
+
+  gtk_spin_button_set_value(g->W_clip_x, (float)procw * g->clip_x);
+  gtk_spin_button_set_value(g->W_clip_y, (float)proch * g->clip_y);
+  gtk_spin_button_set_value(g->W_clip_w, (float)procw * g->clip_w);
+  gtk_spin_button_set_value(g->W_clip_h, (float)proch * g->clip_h);
+
+  dtgtk_expander_set_expanded(DTGTK_EXPANDER(g->numcrop_expander),
+                               gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g->numcrop_toggle)));
+
+  gtk_widget_queue_draw(self->widget);
 }
 
 void init(dt_iop_module_t *module)
@@ -1836,229 +1870,447 @@ static gchar *format_aspect(gchar *original, int adim, int bdim)
   return g_strdup_printf("%s  %4.2f", original, ((float)adim / (float)bdim));
 }
 
+static void _numcrop_sz_changed(GtkSpinButton *widget, gpointer user_data)
+{
+	dt_iop_module_t *self = (dt_iop_module_t*)user_data;
+	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
+	dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self->params;
+	dt_develop_t *dev = self->dev;
 
+	float widget_value;
+	if(self->dt->gui->reset) return;
+
+	int procw, proch;
+	dt_dev_get_processed_size(dev, &procw, &proch);
+
+	int keep_centered;
+	keep_centered = dt_bauhaus_combobox_get(g->W_crop_keep_centered);
+
+	widget_value = gtk_spin_button_get_value(widget);
+
+	// Horizontal
+	if (widget == g->W_clip_w)
+	{
+		g->clip_w = fmaxf(0.1, fminf( 1.0 - g->clip_x, widget_value/(float)procw) );
+		if (keep_centered)
+		{
+			g->clip_x = g->clip_x + (g->prev_clip_w - g->clip_w ) / 2.0;
+			if (g->clip_x < 0.0)
+			{
+				g->clip_x = 0;
+				g->clip_w = 2.0*g->prev_clip_x + g->prev_clip_w ;
+			}
+		}
+	}
+
+	if (widget == g->W_clip_x)
+	{
+		g->clip_x = fmaxf(g->clip_max_x, fminf(1.0 - g->clip_w, widget_value/(float)procw));
+	}
+
+	// Vertical
+	if (widget == g->W_clip_h)
+	{
+		g->clip_h = fmaxf(0.1, fminf( 1.0 - g->clip_y, widget_value/(float)proch));
+
+		if (keep_centered)
+		{
+			g->clip_y = g->clip_y + (g->prev_clip_h - g->clip_h ) / 2.0;
+			if (g->clip_y < 0.0)
+			{
+				g->clip_y = 0;
+				g->clip_h = 2.0*g->prev_clip_y + g->prev_clip_h ;
+			}
+		}
+	}
+
+	if (widget == g->W_clip_y)
+	{
+		g->clip_y = fmaxf(g->clip_max_y, fminf(1.0-g->clip_h, widget_value/(float)proch));
+	}
+
+	commit_box(self, g, p);
+}
+
+static void _numcrop_w_got_focus(GtkSpinButton *widget, GtkScrollType  scroll, gpointer user_data)
+{
+	dt_iop_module_t *self = (dt_iop_module_t*)user_data;
+	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
+	g->prev_clip_w = g->clip_w;
+}
+static void _numcrop_x_got_focus(GtkSpinButton *widget, GtkScrollType  scroll, gpointer user_data)
+{
+	dt_iop_module_t *self = (dt_iop_module_t*)user_data;
+	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
+	g->prev_clip_x = g->clip_x;
+
+}
+static void _numcrop_h_got_focus(GtkSpinButton *widget, GtkScrollType  scroll, gpointer user_data)
+{
+	dt_iop_module_t *self = (dt_iop_module_t*)user_data;
+	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
+	g->prev_clip_h = g->clip_h;
+
+}
+static void _numcrop_y_got_focus(GtkSpinButton *widget,  GtkScrollType  scroll, gpointer user_data)
+{
+	dt_iop_module_t *self = (dt_iop_module_t*)user_data;
+	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
+	g->prev_clip_y = g->clip_y;
+
+}
+static void _numcrop_button_changed(GtkDarktableToggleButton *widget, gpointer user_data)
+{
+  dt_iop_module_t *self = (dt_iop_module_t *)user_data;
+  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
+  dt_develop_t *dev = self->dev;
+  const gboolean active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g->numcrop_toggle));
+  dtgtk_expander_set_expanded(DTGTK_EXPANDER(g->numcrop_expander), active);
+  dtgtk_togglebutton_set_paint(DTGTK_TOGGLEBUTTON(g->numcrop_toggle), dtgtk_cairo_paint_solid_arrow,
+                               CPF_DO_NOT_USE_BORDER | CPF_STYLE_BOX | (active?CPF_DIRECTION_DOWN:CPF_DIRECTION_LEFT), NULL);
+  if (active)
+  {
+	  int procw, proch;
+	  dt_dev_get_processed_size(dev, &procw, &proch);
+	  gtk_spin_button_set_value(g->W_clip_x, (float)procw * g->clip_x);
+	  gtk_spin_button_set_value(g->W_clip_y, (float)proch * g->clip_y);
+	  gtk_spin_button_set_value(g->W_clip_w, (float)procw * g->clip_w);
+	  gtk_spin_button_set_value(g->W_clip_h, (float)proch * g->clip_h);
+
+	  g_signal_handlers_unblock_by_func(G_OBJECT(g->W_clip_x), G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+	  g_signal_handlers_unblock_by_func(G_OBJECT(g->W_clip_y), G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+	  g_signal_handlers_unblock_by_func(G_OBJECT(g->W_clip_w), G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+	  g_signal_handlers_unblock_by_func(G_OBJECT(g->W_clip_h), G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  }
+  else
+  {
+  	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_x),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_y),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_w),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_h),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  }
+}
 void gui_init(struct dt_iop_module_t *self)
 {
-  self->gui_data = calloc(1, sizeof(dt_iop_clipping_gui_data_t));
-  dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
-  dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self->params;
+	self->gui_data = calloc(1, sizeof(dt_iop_clipping_gui_data_t));
+	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
+	dt_iop_clipping_params_t *p = (dt_iop_clipping_params_t *)self->params;
 
-  g->aspect_list = NULL;
-  g->clip_x = g->clip_y = g->handle_x = g->handle_y = 0.0;
-  g->clip_w = g->clip_h = 1.0;
-  g->old_clip_x = g->old_clip_y = 0.0;
-  g->old_clip_w = g->old_clip_h = 1.0;
-  g->clip_max_x = g->clip_max_y = 0.0;
-  g->clip_max_w = g->clip_max_h = 1.0;
-  g->clip_max_pipe_hash = 0;
-  g->cropping = 0;
-  g->straightening = 0;
-  g->applied = 1;
-  g->center_lock = 0;
-  g->k_drag = FALSE;
-  g->k_show = -1;
-  g->k_selected = -1;
-  g->old_width = g->old_height = -1;
+	g->aspect_list = NULL;
+	g->clip_x = g->clip_y = g->handle_x = g->handle_y = 0.0;
+	g->clip_w = g->clip_h = 1.0;
+	g->old_clip_x = g->old_clip_y = 0.0;
+	g->old_clip_w = g->old_clip_h = 1.0;
+	g->clip_max_x = g->clip_max_y = 0.0;
+	g->clip_max_w = g->clip_max_h = 1.0;
+	g->clip_max_pipe_hash = 0;
+	g->cropping = 0;
+	g->straightening = 0;
+	g->applied = 1;
+	g->center_lock = 0;
+	g->k_drag = FALSE;
+	g->k_show = -1;
+	g->k_selected = -1;
+	g->old_width = g->old_height = -1;
 
-  self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
-  dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
-  g->hvflip = dt_bauhaus_combobox_new(self);
-  dt_bauhaus_widget_set_label(g->hvflip, NULL, _("flip"));
-  dt_bauhaus_combobox_add(g->hvflip, _("none"));
-  dt_bauhaus_combobox_add(g->hvflip, _("horizontal"));
-  dt_bauhaus_combobox_add(g->hvflip, _("vertical"));
-  dt_bauhaus_combobox_add(g->hvflip, _("both"));
-  g_signal_connect(G_OBJECT(g->hvflip), "value-changed", G_CALLBACK(hvflip_callback), self);
-  gtk_widget_set_tooltip_text(g->hvflip, _("mirror image horizontally and/or vertically"));
-  gtk_box_pack_start(GTK_BOX(self->widget), g->hvflip, TRUE, TRUE, 0);
+	self->widget = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+	dt_gui_add_help_link(self->widget, dt_get_help_url(self->op));
+	g->hvflip = dt_bauhaus_combobox_new(self);
+	dt_bauhaus_widget_set_label(g->hvflip, NULL, _("flip"));
+	dt_bauhaus_combobox_add(g->hvflip, _("none"));
+	dt_bauhaus_combobox_add(g->hvflip, _("horizontal"));
+	dt_bauhaus_combobox_add(g->hvflip, _("vertical"));
+	dt_bauhaus_combobox_add(g->hvflip, _("both"));
+	g_signal_connect(G_OBJECT(g->hvflip), "value-changed", G_CALLBACK(hvflip_callback), self);
+	gtk_widget_set_tooltip_text(g->hvflip, _("mirror image horizontally and/or vertically"));
+	gtk_box_pack_start(GTK_BOX(self->widget), g->hvflip, TRUE, TRUE, 0);
+
+	g->angle = dt_bauhaus_slider_new_with_range(self, -180.0, 180.0, 0.25, p->angle, 2);
+	dt_bauhaus_widget_set_label(g->angle, NULL, _("angle"));
+	dt_bauhaus_slider_set_format(g->angle, "%.02f°");
+	g_signal_connect(G_OBJECT(g->angle), "value-changed", G_CALLBACK(angle_callback), self);
+	gtk_widget_set_tooltip_text(g->angle, _("right-click and drag a line on the image to drag a straight line"));
+	gtk_box_pack_start(GTK_BOX(self->widget), g->angle, TRUE, TRUE, 0);
+
+	g->keystone_type = dt_bauhaus_combobox_new(self);
+	dt_bauhaus_widget_set_label(g->keystone_type, NULL, _("keystone"));
+	dt_bauhaus_combobox_add(g->keystone_type, _("none"));
+	dt_bauhaus_combobox_add(g->keystone_type, _("vertical"));
+	dt_bauhaus_combobox_add(g->keystone_type, _("horizontal"));
+	dt_bauhaus_combobox_add(g->keystone_type, _("full"));
+	gtk_widget_set_tooltip_text(g->keystone_type, _("set perspective correction for your image"));
+	g_signal_connect(G_OBJECT(g->keystone_type), "value-changed", G_CALLBACK(keystone_type_changed), self);
+	gtk_box_pack_start(GTK_BOX(self->widget), g->keystone_type, TRUE, TRUE, 0);
+
+	g->crop_auto = dt_bauhaus_combobox_new(self);
+	dt_bauhaus_widget_set_label(g->crop_auto, NULL, _("automatic cropping"));
+	dt_bauhaus_combobox_add(g->crop_auto, _("no"));
+	dt_bauhaus_combobox_add(g->crop_auto, _("yes"));
+	gtk_widget_set_tooltip_text(g->crop_auto, _("automatically crop to avoid black edges"));
+	g_signal_connect(G_OBJECT(g->crop_auto), "value-changed", G_CALLBACK(crop_auto_changed), self);
+	gtk_box_pack_start(GTK_BOX(self->widget), g->crop_auto, TRUE, TRUE, 0);
+
+	dt_iop_clipping_aspect_t aspects[] = { { _("freehand"), 0, 0 },
+			{ _("original image"), 1, 0 },
+			{ _("square"), 1, 1 },
+			{ _("10:8 in print"), 2445, 2032 },
+			{ _("5:4, 4x5, 8x10"), 5, 4 },
+			{ _("11x14"), 14, 11 },
+			{ _("8.5x11, letter"), 110, 85 },
+			{ _("4:3, VGA, TV"), 4, 3 },
+			{ _("5x7"), 7, 5 },
+			{ _("ISO 216, DIN 476, A4"), 14142136, 10000000 },
+			{ _("3:2, 4x6, 35mm"), 3, 2 },
+			{ _("16:10, 8x5"), 16, 10 },
+			{ _("golden cut"), 16180340, 10000000 },
+			{ _("16:9, HDTV"), 16, 9 },
+			{ _("widescreen"), 185, 100 },
+			{ _("2:1, univisium"), 2, 1 },
+			{ _("cinemascope"), 235, 100 },
+			{ _("21:9"), 237, 100 },
+			{ _("anamorphic"), 239, 100 },
+			{ _("3:1, panorama"), 300, 100 },
+	};
+
+	const int aspects_count = sizeof(aspects) / sizeof(dt_iop_clipping_aspect_t);
+
+	for(int i = 0; i < aspects_count; i++)
+	{
+		dt_iop_clipping_aspect_t *aspect = g_malloc(sizeof(dt_iop_clipping_aspect_t));
+		aspect->name = format_aspect(aspects[i].name, aspects[i].d, aspects[i].n);
+		aspect->d = aspects[i].d;
+		aspect->n = aspects[i].n;
+		g->aspect_list = g_list_append(g->aspect_list, aspect);
+	}
+
+	// add custom presets from config to the list
+	GSList *custom_aspects = dt_conf_all_string_entries("plugins/darkroom/clipping/extra_aspect_ratios");
+	for(GSList *iter = custom_aspects; iter; iter = g_slist_next(iter))
+	{
+		dt_conf_string_entry_t *nv = (dt_conf_string_entry_t *)iter->data;
+
+		const char *c = nv->value;
+		const char *end = nv->value + strlen(nv->value);
+		while(*c != ':' && *c != '/' && c < end) c++;
+		if(c < end - 1)
+		{
+			c++;
+			int d = atoi(nv->value);
+			int n = atoi(c);
+			// some sanity check
+			if(n == 0 || d == 0)
+			{
+				fprintf(stderr, "invalid ratio format for `%s'. it should be \"number:number\"\n", nv->key);
+				dt_control_log(_("invalid ratio format for `%s'. it should be \"number:number\""), nv->key);
+				continue;
+			}
+			dt_iop_clipping_aspect_t *aspect = g_malloc(sizeof(dt_iop_clipping_aspect_t));
+			aspect->name = format_aspect(nv->key, d, n);
+			aspect->d = d;
+			aspect->n = n;
+			g->aspect_list = g_list_append(g->aspect_list, aspect);
+		}
+		else
+		{
+			fprintf(stderr, "invalid ratio format for `%s'. it should be \"number:number\"\n", nv->key);
+			dt_control_log(_("invalid ratio format for `%s'. it should be \"number:number\""), nv->key);
+			continue;
+		}
+
+	}
+	g_slist_free_full(custom_aspects, dt_conf_string_entry_free);
 
 
-  g->angle = dt_bauhaus_slider_new_with_range(self, -180.0, 180.0, 0.25, p->angle, 2);
-  dt_bauhaus_widget_set_label(g->angle, NULL, _("angle"));
-  dt_bauhaus_slider_set_format(g->angle, "%.02f°");
-  g_signal_connect(G_OBJECT(g->angle), "value-changed", G_CALLBACK(angle_callback), self);
-  gtk_widget_set_tooltip_text(g->angle, _("right-click and drag a line on the image to drag a straight line"));
-  gtk_box_pack_start(GTK_BOX(self->widget), g->angle, TRUE, TRUE, 0);
+	g->aspect_list = g_list_sort(g->aspect_list, (GCompareFunc)_aspect_ratio_cmp);
 
-  g->keystone_type = dt_bauhaus_combobox_new(self);
-  dt_bauhaus_widget_set_label(g->keystone_type, NULL, _("keystone"));
-  dt_bauhaus_combobox_add(g->keystone_type, _("none"));
-  dt_bauhaus_combobox_add(g->keystone_type, _("vertical"));
-  dt_bauhaus_combobox_add(g->keystone_type, _("horizontal"));
-  dt_bauhaus_combobox_add(g->keystone_type, _("full"));
-  gtk_widget_set_tooltip_text(g->keystone_type, _("set perspective correction for your image"));
-  g_signal_connect(G_OBJECT(g->keystone_type), "value-changed", G_CALLBACK(keystone_type_changed), self);
-  gtk_box_pack_start(GTK_BOX(self->widget), g->keystone_type, TRUE, TRUE, 0);
+	// remove duplicates from the aspect ratio list
+	int d = ((dt_iop_clipping_aspect_t *)g->aspect_list->data)->d + 1,
+			n = ((dt_iop_clipping_aspect_t *)g->aspect_list->data)->n + 1;
+	for(GList *iter = g->aspect_list; iter; iter = g_list_next(iter))
+	{
+		dt_iop_clipping_aspect_t *aspect = (dt_iop_clipping_aspect_t *)iter->data;
+		int dd = MIN(aspect->d, aspect->n);
+		int nn = MAX(aspect->d, aspect->n);
+		if(dd == d && nn == n)
+		{
+			// same as the last one, remove this entry
+			g_free(aspect->name);
+			GList *prev = g_list_previous(iter);
+			g->aspect_list = g_list_delete_link(g->aspect_list, iter);
+			// it should never be NULL as the 1st element can't be a duplicate, but better safe than sorry
+			iter = prev ? prev : g->aspect_list;
+		}
+		else
+		{
+			d = dd;
+			n = nn;
+		}
+	}
 
-  g->crop_auto = dt_bauhaus_combobox_new(self);
-  dt_bauhaus_widget_set_label(g->crop_auto, NULL, _("automatic cropping"));
-  dt_bauhaus_combobox_add(g->crop_auto, _("no"));
-  dt_bauhaus_combobox_add(g->crop_auto, _("yes"));
-  gtk_widget_set_tooltip_text(g->crop_auto, _("automatically crop to avoid black edges"));
-  g_signal_connect(G_OBJECT(g->crop_auto), "value-changed", G_CALLBACK(crop_auto_changed), self);
-  gtk_box_pack_start(GTK_BOX(self->widget), g->crop_auto, TRUE, TRUE, 0);
+	g->aspect_presets = dt_bauhaus_combobox_new(self);
+	dt_bauhaus_combobox_set_editable(g->aspect_presets, 1);
+	dt_bauhaus_widget_set_label(g->aspect_presets, NULL, _("aspect"));
 
-  dt_iop_clipping_aspect_t aspects[] = { { _("freehand"), 0, 0 },
-                                         { _("original image"), 1, 0 },
-                                         { _("square"), 1, 1 },
-                                         { _("10:8 in print"), 2445, 2032 },
-                                         { _("5:4, 4x5, 8x10"), 5, 4 },
-                                         { _("11x14"), 14, 11 },
-                                         { _("8.5x11, letter"), 110, 85 },
-                                         { _("4:3, VGA, TV"), 4, 3 },
-                                         { _("5x7"), 7, 5 },
-                                         { _("ISO 216, DIN 476, A4"), 14142136, 10000000 },
-                                         { _("3:2, 4x6, 35mm"), 3, 2 },
-                                         { _("16:10, 8x5"), 16, 10 },
-                                         { _("golden cut"), 16180340, 10000000 },
-                                         { _("16:9, HDTV"), 16, 9 },
-                                         { _("widescreen"), 185, 100 },
-                                         { _("2:1, univisium"), 2, 1 },
-                                         { _("cinemascope"), 235, 100 },
-                                         { _("21:9"), 237, 100 },
-                                         { _("anamorphic"), 239, 100 },
-                                         { _("3:1, panorama"), 300, 100 },
-  };
+	for(GList *iter = g->aspect_list; iter; iter = g_list_next(iter))
+	{
+		const dt_iop_clipping_aspect_t *aspect = iter->data;
+		dt_bauhaus_combobox_add(g->aspect_presets, aspect->name);
+	}
 
-  const int aspects_count = sizeof(aspects) / sizeof(dt_iop_clipping_aspect_t);
+	dt_bauhaus_combobox_set(g->aspect_presets, 0);
 
-  for(int i = 0; i < aspects_count; i++)
-  {
-    dt_iop_clipping_aspect_t *aspect = g_malloc(sizeof(dt_iop_clipping_aspect_t));
-    aspect->name = format_aspect(aspects[i].name, aspects[i].d, aspects[i].n);
-    aspect->d = aspects[i].d;
-    aspect->n = aspects[i].n;
-    g->aspect_list = g_list_append(g->aspect_list, aspect);
-  }
+	g_signal_connect(G_OBJECT(g->aspect_presets), "value-changed", G_CALLBACK(aspect_presets_changed), self);
+	gtk_widget_set_tooltip_text(g->aspect_presets, _("set the aspect ratio\n"
+			"the list is sorted: from most square to least square"));
+	dt_bauhaus_widget_set_quad_paint(g->aspect_presets, dtgtk_cairo_paint_aspectflip, 0, NULL);
+	g_signal_connect(G_OBJECT(g->aspect_presets), "quad-pressed", G_CALLBACK(aspect_flip), self);
+	gtk_box_pack_start(GTK_BOX(self->widget), g->aspect_presets, TRUE, TRUE, 0);
 
-  // add custom presets from config to the list
-  GSList *custom_aspects = dt_conf_all_string_entries("plugins/darkroom/clipping/extra_aspect_ratios");
-  for(GSList *iter = custom_aspects; iter; iter = g_slist_next(iter))
-  {
-    dt_conf_string_entry_t *nv = (dt_conf_string_entry_t *)iter->data;
+	g->guide_lines = dt_bauhaus_combobox_new(self);
+	dt_bauhaus_widget_set_label(g->guide_lines, NULL, _("guides"));
+	gtk_box_pack_start(GTK_BOX(self->widget), g->guide_lines, TRUE, TRUE, 0);
 
-    const char *c = nv->value;
-    const char *end = nv->value + strlen(nv->value);
-    while(*c != ':' && *c != '/' && c < end) c++;
-    if(c < end - 1)
-    {
-      c++;
-      int d = atoi(nv->value);
-      int n = atoi(c);
-      // some sanity check
-      if(n == 0 || d == 0)
-      {
-        fprintf(stderr, "invalid ratio format for `%s'. it should be \"number:number\"\n", nv->key);
-        dt_control_log(_("invalid ratio format for `%s'. it should be \"number:number\""), nv->key);
-        continue;
-      }
-      dt_iop_clipping_aspect_t *aspect = g_malloc(sizeof(dt_iop_clipping_aspect_t));
-      aspect->name = format_aspect(nv->key, d, n);
-      aspect->d = d;
-      aspect->n = n;
-      g->aspect_list = g_list_append(g->aspect_list, aspect);
-    }
-    else
-    {
-      fprintf(stderr, "invalid ratio format for `%s'. it should be \"number:number\"\n", nv->key);
-      dt_control_log(_("invalid ratio format for `%s'. it should be \"number:number\""), nv->key);
-      continue;
-    }
+	g->guides_widgets = gtk_stack_new();
+	gtk_stack_set_homogeneous(GTK_STACK(g->guides_widgets), FALSE);
+	gtk_box_pack_start(GTK_BOX(self->widget), g->guides_widgets, TRUE, TRUE, 0);
 
-  }
-  g_slist_free_full(custom_aspects, dt_conf_string_entry_free);
+	dt_bauhaus_combobox_add(g->guide_lines, _("none"));
+	int i = 0;
+	for(GList *iter = darktable.guides; iter; iter = g_list_next(iter), i++)
+	{
+		GtkWidget *widget = NULL;
+		dt_guides_t *guide = (dt_guides_t *)iter->data;
+		dt_bauhaus_combobox_add(g->guide_lines, _(guide->name));
+		if(guide->widget)
+		{
+			// generate some unique name so that we can have the same name several times
+			char name[5];
+			snprintf(name, sizeof(name), "%d", i);
+			widget = guide->widget(self, guide->user_data);
+			gtk_widget_show_all(widget);
+			gtk_stack_add_named(GTK_STACK(g->guides_widgets), widget, name);
+		}
+		g->guides_widgets_list = g_list_append(g->guides_widgets_list, widget);
+	}
 
+	int guide = dt_conf_get_int("plugins/darkroom/clipping/guide");
+	dt_bauhaus_combobox_set(g->guide_lines, guide);
 
-  g->aspect_list = g_list_sort(g->aspect_list, (GCompareFunc)_aspect_ratio_cmp);
+	gtk_widget_set_tooltip_text(g->guide_lines, _("display guide lines to help compose your photograph"));
+	g_signal_connect(G_OBJECT(g->guide_lines), "value-changed", G_CALLBACK(guides_presets_changed), self);
 
-  // remove duplicates from the aspect ratio list
-  int d = ((dt_iop_clipping_aspect_t *)g->aspect_list->data)->d + 1,
-      n = ((dt_iop_clipping_aspect_t *)g->aspect_list->data)->n + 1;
-  for(GList *iter = g->aspect_list; iter; iter = g_list_next(iter))
-  {
-    dt_iop_clipping_aspect_t *aspect = (dt_iop_clipping_aspect_t *)iter->data;
-    int dd = MIN(aspect->d, aspect->n);
-    int nn = MAX(aspect->d, aspect->n);
-    if(dd == d && nn == n)
-    {
-      // same as the last one, remove this entry
-      g_free(aspect->name);
-      GList *prev = g_list_previous(iter);
-      g->aspect_list = g_list_delete_link(g->aspect_list, iter);
-      // it should never be NULL as the 1st element can't be a duplicate, but better safe than sorry
-      iter = prev ? prev : g->aspect_list;
-    }
-    else
-    {
-      d = dd;
-      n = nn;
-    }
-  }
+	g->flip_guides = dt_bauhaus_combobox_new(self);
+	dt_bauhaus_widget_set_label(g->flip_guides, NULL, _("flip guides"));
+	dt_bauhaus_combobox_add(g->flip_guides, _("none"));
+	dt_bauhaus_combobox_add(g->flip_guides, _("horizontally"));
+	dt_bauhaus_combobox_add(g->flip_guides, _("vertically"));
+	dt_bauhaus_combobox_add(g->flip_guides, _("both"));
+	gtk_widget_set_tooltip_text(g->flip_guides, _("flip guides"));
+	g_signal_connect(G_OBJECT(g->flip_guides), "value-changed", G_CALLBACK(guides_flip_changed), self);
+	gtk_box_pack_start(GTK_BOX(self->widget), g->flip_guides, TRUE, TRUE, 0);
+	dt_bauhaus_combobox_set(g->flip_guides, dt_conf_get_int("plugins/darkroom/clipping/flip_guides"));
 
-  g->aspect_presets = dt_bauhaus_combobox_new(self);
-  dt_bauhaus_combobox_set_editable(g->aspect_presets, 1);
-  dt_bauhaus_widget_set_label(g->aspect_presets, NULL, _("aspect"));
+	guides_presets_set_visibility(g, guide);
 
-  for(GList *iter = g->aspect_list; iter; iter = g_list_next(iter))
-  {
-    const dt_iop_clipping_aspect_t *aspect = iter->data;
-    dt_bauhaus_combobox_add(g->aspect_presets, aspect->name);
-  }
+	/* Crop numeric input section */
+	/* initialize colapsible section */
+	GtkWidget *numcrop_head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_BAUHAUS_SPACE);
+	GtkWidget *numcrop = dt_ui_section_label_new(_("numeric cropping"));
+	g->numcrop_toggle = dtgtk_togglebutton_new(dtgtk_cairo_paint_solid_arrow, CPF_DO_NOT_USE_BORDER | CPF_STYLE_BOX | CPF_DIRECTION_LEFT, NULL);
+	gtk_widget_set_size_request(g->numcrop_toggle,  DT_PIXEL_APPLY_DPI(15), DT_PIXEL_APPLY_DPI(15));
+	GtkWidget *numcrop_options = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
+	gtk_box_pack_start(GTK_BOX(numcrop_head), numcrop, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(numcrop_head), g->numcrop_toggle, FALSE, FALSE, 0);
+	gtk_widget_set_visible(numcrop_options, FALSE);
+	g->numcrop_expander = dtgtk_expander_new(numcrop_head,numcrop_options);
+	dtgtk_expander_set_expanded(DTGTK_EXPANDER(g->numcrop_expander), TRUE);
+	gtk_box_pack_start(GTK_BOX(self->widget), g->numcrop_expander, FALSE, FALSE, 0);
 
-  dt_bauhaus_combobox_set(g->aspect_presets, 0);
+	g->W_crop_keep_centered = dt_bauhaus_combobox_new(self);
+	dt_bauhaus_widget_set_label(g->W_crop_keep_centered, NULL, _("keep crop center"));
+	dt_bauhaus_combobox_add(g->W_crop_keep_centered, _("no"));
+	dt_bauhaus_combobox_add(g->W_crop_keep_centered, _("yes"));
+	gtk_widget_set_tooltip_text(g->W_crop_keep_centered, _("keep center of cropping area"));
+	gtk_box_pack_start(GTK_BOX(numcrop_options), g->W_crop_keep_centered, TRUE, TRUE, 0);
 
-  g_signal_connect(G_OBJECT(g->aspect_presets), "value-changed", G_CALLBACK(aspect_presets_changed), self);
-  gtk_widget_set_tooltip_text(g->aspect_presets, _("set the aspect ratio\n"
-                                                   "the list is sorted: from most square to least square"));
-  dt_bauhaus_widget_set_quad_paint(g->aspect_presets, dtgtk_cairo_paint_aspectflip, 0, NULL);
-  g_signal_connect(G_OBJECT(g->aspect_presets), "quad-pressed", G_CALLBACK(aspect_flip), self);
-  gtk_box_pack_start(GTK_BOX(self->widget), g->aspect_presets, TRUE, TRUE, 0);
+	g->W_clip_x = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, EXPORT_MAX_IMAGE_SIZE, 1)); // @suppress("Symbol is not resolved")
+	g->W_clip_y = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, EXPORT_MAX_IMAGE_SIZE, 1)); // @suppress("Symbol is not resolved")
+	g->W_clip_w = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, EXPORT_MAX_IMAGE_SIZE, 1)); // @suppress("Symbol is not resolved")
+	g->W_clip_h = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, EXPORT_MAX_IMAGE_SIZE, 1)); // @suppress("Symbol is not resolved")
 
-  g->guide_lines = dt_bauhaus_combobox_new(self);
-  dt_bauhaus_widget_set_label(g->guide_lines, NULL, _("guides"));
-  gtk_box_pack_start(GTK_BOX(self->widget), g->guide_lines, TRUE, TRUE, 0);
+	// 6 digit
+	gtk_entry_set_width_chars (GTK_ENTRY(g->W_clip_x), 6);
+	gtk_entry_set_width_chars (GTK_ENTRY(g->W_clip_y), 6);
+	gtk_entry_set_width_chars (GTK_ENTRY(g->W_clip_w), 6);
+	gtk_entry_set_width_chars (GTK_ENTRY(g->W_clip_h), 6);
+	// Align right
+	gtk_entry_set_alignment (GTK_ENTRY(g->W_clip_x), 1);
+	gtk_entry_set_alignment (GTK_ENTRY(g->W_clip_y), 1);
+	gtk_entry_set_alignment (GTK_ENTRY(g->W_clip_w), 1);
+	gtk_entry_set_alignment (GTK_ENTRY(g->W_clip_h), 1);
+	// Tooltip
+	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_x), _("Horizontal start"));
+	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_y), _("Vertical start"));
+	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_w), _("Clip width"));
+	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_h), _("Clip height"));
 
-  g->guides_widgets = gtk_stack_new();
-  gtk_stack_set_homogeneous(GTK_STACK(g->guides_widgets), FALSE);
-  gtk_box_pack_start(GTK_BOX(self->widget), g->guides_widgets, TRUE, TRUE, 0);
+	// Must inhibit accel, otherwise sigsegv if used in the widget !
+	dt_gui_key_accel_block_on_focus_connect(GTK_WIDGET(g->W_clip_x));
+	dt_gui_key_accel_block_on_focus_connect(GTK_WIDGET(g->W_clip_y));
+	dt_gui_key_accel_block_on_focus_connect(GTK_WIDGET(g->W_clip_w));
+	dt_gui_key_accel_block_on_focus_connect(GTK_WIDGET(g->W_clip_h));
 
-  dt_bauhaus_combobox_add(g->guide_lines, _("none"));
-  int i = 0;
-  for(GList *iter = darktable.guides; iter; iter = g_list_next(iter), i++)
-  {
-    GtkWidget *widget = NULL;
-    dt_guides_t *guide = (dt_guides_t *)iter->data;
-    dt_bauhaus_combobox_add(g->guide_lines, _(guide->name));
-    if(guide->widget)
-    {
-      // generate some unique name so that we can have the same name several times
-      char name[5];
-      snprintf(name, sizeof(name), "%d", i);
-      widget = guide->widget(self, guide->user_data);
-      gtk_widget_show_all(widget);
-      gtk_stack_add_named(GTK_STACK(g->guides_widgets), widget, name);
-    }
-    g->guides_widgets_list = g_list_append(g->guides_widgets_list, widget);
-  }
+	GtkWidget *label_clip_x, *label_clip_y, *label_clip_w, *label_clip_h;
+	GtkBox *hbox_clip_r1 = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_PIXEL_APPLY_DPI(10)));
+	label_clip_x = gtk_label_new(_("x"));
+	gtk_label_set_width_chars(GTK_LABEL(label_clip_x),2);
+	gtk_label_set_ellipsize(GTK_LABEL(label_clip_x), PANGO_ELLIPSIZE_MIDDLE);
+	g_object_set(G_OBJECT(label_clip_x), "xalign", 0.0, (gchar *)0);
+	gtk_box_pack_start(hbox_clip_r1, label_clip_x, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(hbox_clip_r1), GTK_WIDGET(g->W_clip_x), FALSE, FALSE, 0);
 
-  int guide = dt_conf_get_int("plugins/darkroom/clipping/guide");
-  dt_bauhaus_combobox_set(g->guide_lines, guide);
+	label_clip_y = gtk_label_new(_("y"));
+	gtk_label_set_width_chars(GTK_LABEL(label_clip_y),2);
+	gtk_label_set_ellipsize(GTK_LABEL(label_clip_y), PANGO_ELLIPSIZE_MIDDLE);
+	g_object_set(G_OBJECT(label_clip_y), "xalign", 0.0, (gchar *)0);
+	gtk_box_pack_start(hbox_clip_r1, label_clip_y, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(hbox_clip_r1), GTK_WIDGET(g->W_clip_y), FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(numcrop_options),GTK_WIDGET(hbox_clip_r1), FALSE, FALSE, 0);
 
-  gtk_widget_set_tooltip_text(g->guide_lines, _("display guide lines to help compose your photograph"));
-  g_signal_connect(G_OBJECT(g->guide_lines), "value-changed", G_CALLBACK(guides_presets_changed), self);
+	GtkBox *hbox_clip_r2 = GTK_BOX(gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_PIXEL_APPLY_DPI(10)));
+	label_clip_w = gtk_label_new(_("w"));
+	gtk_label_set_width_chars(GTK_LABEL(label_clip_w),2);
+	gtk_label_set_ellipsize(GTK_LABEL(label_clip_w), PANGO_ELLIPSIZE_MIDDLE);
+	g_object_set(G_OBJECT(label_clip_w), "xalign", 0.0, (gchar *)0);
+	gtk_box_pack_start(hbox_clip_r2, label_clip_w, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(hbox_clip_r2), GTK_WIDGET(g->W_clip_w), FALSE, FALSE, 0);
 
-  g->flip_guides = dt_bauhaus_combobox_new(self);
-  dt_bauhaus_widget_set_label(g->flip_guides, NULL, _("flip guides"));
-  dt_bauhaus_combobox_add(g->flip_guides, _("none"));
-  dt_bauhaus_combobox_add(g->flip_guides, _("horizontally"));
-  dt_bauhaus_combobox_add(g->flip_guides, _("vertically"));
-  dt_bauhaus_combobox_add(g->flip_guides, _("both"));
-  gtk_widget_set_tooltip_text(g->flip_guides, _("flip guides"));
-  g_signal_connect(G_OBJECT(g->flip_guides), "value-changed", G_CALLBACK(guides_flip_changed), self);
-  gtk_box_pack_start(GTK_BOX(self->widget), g->flip_guides, TRUE, TRUE, 0);
-  dt_bauhaus_combobox_set(g->flip_guides, dt_conf_get_int("plugins/darkroom/clipping/flip_guides"));
+	label_clip_h = gtk_label_new(_("h"));
+	gtk_label_set_width_chars(GTK_LABEL(label_clip_h),2);
+	gtk_label_set_ellipsize(GTK_LABEL(label_clip_h), PANGO_ELLIPSIZE_MIDDLE);
+	g_object_set(G_OBJECT(label_clip_h), "xalign", 0.0, (gchar *)0);
+	gtk_box_pack_start(hbox_clip_r2, label_clip_h, FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(hbox_clip_r2), GTK_WIDGET(g->W_clip_h), FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(numcrop_options),GTK_WIDGET(hbox_clip_r2), FALSE, FALSE, 0);
 
-  guides_presets_set_visibility(g, guide);
+	g_signal_connect(G_OBJECT(g->W_clip_x), "value-changed", G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+	g_signal_connect(G_OBJECT(g->W_clip_y), "value-changed", G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+	g_signal_connect(G_OBJECT(g->W_clip_w), "value-changed", G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+	g_signal_connect(G_OBJECT(g->W_clip_h), "value-changed", G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+
+	g_signal_connect(G_OBJECT(g->W_clip_x), "enter-notify-event", G_CALLBACK(_numcrop_x_got_focus),  (gpointer)self);
+	g_signal_connect(G_OBJECT(g->W_clip_y), "enter-notify-event", G_CALLBACK(_numcrop_y_got_focus),  (gpointer)self);
+	g_signal_connect(G_OBJECT(g->W_clip_w), "enter-notify-event", G_CALLBACK(_numcrop_w_got_focus),  (gpointer)self);
+	g_signal_connect(G_OBJECT(g->W_clip_h), "enter-notify-event", G_CALLBACK(_numcrop_h_got_focus),  (gpointer)self);
+
+	// Visibility of the controls by the collapsible section will enable their events and update their value
+	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_x),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_y),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_w),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_h),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+
+	g_signal_connect(G_OBJECT(g->numcrop_toggle), "toggled", G_CALLBACK(_numcrop_button_changed),  (gpointer)self);
+
 }
 
 static void free_aspect(gpointer data)
@@ -2189,6 +2441,9 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
     cairo_stroke(cr);
   }
 
+	int procw, proch;
+	dt_dev_get_processed_size(dev, &procw, &proch);
+
   // draw cropping window dimensions if first mouse button is pressed
   if(darktable.control->button_down && darktable.control->button_down_which == 1 && g->k_show != 1)
   {
@@ -2201,9 +2456,6 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
     pango_font_description_set_absolute_size(desc, DT_PIXEL_APPLY_DPI(16) * PANGO_SCALE / zoom_scale);
     layout = pango_cairo_create_layout(cr);
     pango_layout_set_font_description(layout, desc);
-
-    int procw, proch;
-    dt_dev_get_processed_size(dev, &procw, &proch);
     snprintf(dimensions, sizeof(dimensions), "%.0fx%.0f", (float)procw * g->clip_w, (float)proch * g->clip_h);
 
     pango_layout_set_text(layout, dimensions, -1);
@@ -2528,6 +2780,27 @@ void gui_post_expose(struct dt_iop_module_t *self, cairo_t *cr, int32_t width, i
         gui_draw_sym(cr, (pts[6] + pts[4]) / 2.0f, (pts[7] + pts[5]) / 2.0f, sym);
       }
     }
+  }
+
+  // Only update controls if they are visible
+  const gboolean active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(g->numcrop_toggle));
+  if (active)
+  {
+  	// Inhibit callbacks to avoid event triggering
+  	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_x),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_y),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_w),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_h),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+
+  	gtk_spin_button_set_value(g->W_clip_x, (float)procw * g->clip_x);
+  	gtk_spin_button_set_value(g->W_clip_y, (float)proch * g->clip_y);
+  	gtk_spin_button_set_value(g->W_clip_w, (float)procw * g->clip_w);
+  	gtk_spin_button_set_value(g->W_clip_h, (float)proch * g->clip_h);
+
+  	g_signal_handlers_unblock_by_func(G_OBJECT(g->W_clip_x), G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  	g_signal_handlers_unblock_by_func(G_OBJECT(g->W_clip_y), G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  	g_signal_handlers_unblock_by_func(G_OBJECT(g->W_clip_w), G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
+  	g_signal_handlers_unblock_by_func(G_OBJECT(g->W_clip_h), G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
   }
 }
 

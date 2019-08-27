@@ -2216,6 +2216,7 @@ void gui_init(struct dt_iop_module_t *self)
 	/* initialize colapsible section */
 	GtkWidget *numcrop_head = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, DT_BAUHAUS_SPACE);
 	GtkWidget *numcrop = dt_ui_section_label_new(_("numeric cropping"));
+	gtk_widget_set_tooltip_text(GTK_WIDGET(numcrop), _("Controls to control cropping at pixel size precision"));
 	g->numcrop_toggle = dtgtk_togglebutton_new(dtgtk_cairo_paint_solid_arrow, CPF_DO_NOT_USE_BORDER | CPF_STYLE_BOX | CPF_DIRECTION_LEFT, NULL);
 	gtk_widget_set_size_request(g->numcrop_toggle,  DT_PIXEL_APPLY_DPI(15), DT_PIXEL_APPLY_DPI(15));
 	GtkWidget *numcrop_options = gtk_box_new(GTK_ORIENTATION_VERTICAL, DT_BAUHAUS_SPACE);
@@ -2230,7 +2231,7 @@ void gui_init(struct dt_iop_module_t *self)
 	dt_bauhaus_widget_set_label(g->W_crop_keep_centered, NULL, _("keep crop center"));
 	dt_bauhaus_combobox_add(g->W_crop_keep_centered, _("no"));
 	dt_bauhaus_combobox_add(g->W_crop_keep_centered, _("yes"));
-	gtk_widget_set_tooltip_text(g->W_crop_keep_centered, _("keep center of cropping area"));
+	gtk_widget_set_tooltip_text(g->W_crop_keep_centered, _("keep center of cropping area at the same place relative to the input image"));
 	gtk_box_pack_start(GTK_BOX(numcrop_options), g->W_crop_keep_centered, TRUE, TRUE, 0);
 
 	g->W_clip_x = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, EXPORT_MAX_IMAGE_SIZE, 1)); // @suppress("Symbol is not resolved")
@@ -2249,10 +2250,10 @@ void gui_init(struct dt_iop_module_t *self)
 	gtk_entry_set_alignment (GTK_ENTRY(g->W_clip_w), 1);
 	gtk_entry_set_alignment (GTK_ENTRY(g->W_clip_h), 1);
 	// Tooltip
-	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_x), _("Horizontal start"));
-	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_y), _("Vertical start"));
-	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_w), _("Clip width"));
-	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_h), _("Clip height"));
+	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_x), _("Horizontal component of top left corner of the area kept"));
+	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_y), _("Vertical component of top left corner of the area kept"));
+	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_w), _("Width of the area kept"));
+	gtk_widget_set_tooltip_text(GTK_WIDGET(g->W_clip_h), _("Height of the area kept"));
 
 	// Must inhibit accel, otherwise sigsegv if used in the widget !
 	dt_gui_key_accel_block_on_focus_connect(GTK_WIDGET(g->W_clip_x));

@@ -1887,6 +1887,7 @@ static void _numcrop_sz_changed(GtkSpinButton *widget, gpointer user_data)
 	keep_centered = dt_bauhaus_combobox_get(g->W_crop_keep_centered);
 
 	widget_value = gtk_spin_button_get_value(widget);
+	fprintf(stderr, "in  widget_value %f, prev x = %f, x = %f, prev w = %f, w = %f \n", widget_value, g->prev_clip_x * procw, g->clip_x* procw, g->prev_clip_w * procw, g->clip_w * procw);
 
 	// Horizontal
 	if (widget == g->W_clip_w)
@@ -1900,12 +1901,16 @@ static void _numcrop_sz_changed(GtkSpinButton *widget, gpointer user_data)
 				g->clip_x = 0;
 				g->clip_w = 2.0*g->prev_clip_x + g->prev_clip_w ;
 			}
+			g->prev_clip_x = g->clip_x;
+			g->prev_clip_w = g->clip_w;
 		}
 	}
+	fprintf(stderr, "out widget_value %f, prev x = %f, x = %f, prev w = %f, w = %f \n", widget_value, g->prev_clip_x * procw, g->clip_x* procw, g->prev_clip_w * procw, g->clip_w * procw);
 
 	if (widget == g->W_clip_x)
 	{
 		g->clip_x = fmaxf(g->clip_max_x, fminf(1.0 - g->clip_w, widget_value/(float)procw));
+		g->prev_clip_x = g->clip_x ;
 	}
 
 	// Vertical
@@ -1921,44 +1926,20 @@ static void _numcrop_sz_changed(GtkSpinButton *widget, gpointer user_data)
 				g->clip_y = 0;
 				g->clip_h = 2.0*g->prev_clip_y + g->prev_clip_h ;
 			}
+			g->prev_clip_y = g->clip_y;
+			g->prev_clip_h = g->clip_h;
 		}
 	}
 
 	if (widget == g->W_clip_y)
 	{
 		g->clip_y = fmaxf(g->clip_max_y, fminf(1.0-g->clip_h, widget_value/(float)proch));
+		g->prev_clip_y = g->clip_y ;
 	}
 
 	commit_box(self, g, p);
 }
 
-static void _numcrop_w_got_focus(GtkSpinButton *widget, GtkScrollType  scroll, gpointer user_data)
-{
-	dt_iop_module_t *self = (dt_iop_module_t*)user_data;
-	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
-	g->prev_clip_w = g->clip_w;
-}
-static void _numcrop_x_got_focus(GtkSpinButton *widget, GtkScrollType  scroll, gpointer user_data)
-{
-	dt_iop_module_t *self = (dt_iop_module_t*)user_data;
-	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
-	g->prev_clip_x = g->clip_x;
-
-}
-static void _numcrop_h_got_focus(GtkSpinButton *widget, GtkScrollType  scroll, gpointer user_data)
-{
-	dt_iop_module_t *self = (dt_iop_module_t*)user_data;
-	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
-	g->prev_clip_h = g->clip_h;
-
-}
-static void _numcrop_y_got_focus(GtkSpinButton *widget,  GtkScrollType  scroll, gpointer user_data)
-{
-	dt_iop_module_t *self = (dt_iop_module_t*)user_data;
-	dt_iop_clipping_gui_data_t *g = (dt_iop_clipping_gui_data_t *)self->gui_data;
-	g->prev_clip_y = g->clip_y;
-
-}
 static void _numcrop_button_changed(GtkDarktableToggleButton *widget, gpointer user_data)
 {
   dt_iop_module_t *self = (dt_iop_module_t *)user_data;
@@ -1972,6 +1953,10 @@ static void _numcrop_button_changed(GtkDarktableToggleButton *widget, gpointer u
   {
 	  int procw, proch;
 	  dt_dev_get_processed_size(dev, &procw, &proch);
+		g->prev_clip_x = g->clip_x;
+		g->prev_clip_y = g->clip_y;
+		g->prev_clip_w = g->clip_w;
+		g->prev_clip_h = g->clip_h;
 	  gtk_spin_button_set_value(g->W_clip_x, (float)procw * g->clip_x);
 	  gtk_spin_button_set_value(g->W_clip_y, (float)proch * g->clip_y);
 	  gtk_spin_button_set_value(g->W_clip_w, (float)procw * g->clip_w);
@@ -2298,11 +2283,6 @@ void gui_init(struct dt_iop_module_t *self)
 	g_signal_connect(G_OBJECT(g->W_clip_y), "value-changed", G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
 	g_signal_connect(G_OBJECT(g->W_clip_w), "value-changed", G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
 	g_signal_connect(G_OBJECT(g->W_clip_h), "value-changed", G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);
-
-	g_signal_connect(G_OBJECT(g->W_clip_x), "enter-notify-event", G_CALLBACK(_numcrop_x_got_focus),  (gpointer)self);
-	g_signal_connect(G_OBJECT(g->W_clip_y), "enter-notify-event", G_CALLBACK(_numcrop_y_got_focus),  (gpointer)self);
-	g_signal_connect(G_OBJECT(g->W_clip_w), "enter-notify-event", G_CALLBACK(_numcrop_w_got_focus),  (gpointer)self);
-	g_signal_connect(G_OBJECT(g->W_clip_h), "enter-notify-event", G_CALLBACK(_numcrop_h_got_focus),  (gpointer)self);
 
 	// Visibility of the controls by the collapsible section will enable their events and update their value
 	g_signal_handlers_block_by_func(G_OBJECT(g->W_clip_x),  G_CALLBACK(_numcrop_sz_changed),  (gpointer)self);

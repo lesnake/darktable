@@ -1887,25 +1887,40 @@ static void _numcrop_sz_changed(GtkSpinButton *widget, gpointer user_data)
 	keep_centered = dt_bauhaus_combobox_get(g->W_crop_keep_centered);
 
 	widget_value = gtk_spin_button_get_value(widget);
-	fprintf(stderr, "in  widget_value %f, prev x = %f, x = %f, prev w = %f, w = %f \n", widget_value, g->prev_clip_x * procw, g->clip_x* procw, g->prev_clip_w * procw, g->clip_w * procw);
 
 	// Horizontal
 	if (widget == g->W_clip_w)
 	{
-		g->clip_w = fmaxf(0.1, fminf( 1.0 - g->clip_x, widget_value/(float)procw) );
 		if (keep_centered)
 		{
-			g->clip_x = g->clip_x + (g->prev_clip_w - g->clip_w ) / 2.0;
+			float clip_unclamped;
+			clip_unclamped = widget_value / (float)procw;
+
+			if ( clip_unclamped > (1-g->clip_x) )
+			{
+				// In this case, it is necessary to detect if right edge was clamped to 1. In this case we must also move left edge to the left to keep center at the same location
+				clip_unclamped = g->prev_clip_w + 2.0 * (1.0 - ( g->clip_x + g->prev_clip_w) );
+			}
+			else if (clip_unclamped < 0.1 )
+			{
+				clip_unclamped = 0.1;
+			}
+
+			g->clip_w = clip_unclamped;
+
+			g->clip_x = g->clip_x + (g->prev_clip_w - g->clip_w ) * 0.5;
+
 			if (g->clip_x < 0.0)
 			{
 				g->clip_x = 0;
-				g->clip_w = 2.0*g->prev_clip_x + g->prev_clip_w ;
+				g->clip_w = 2.0 * g->prev_clip_x + g->prev_clip_w ;
 			}
 			g->prev_clip_x = g->clip_x;
 			g->prev_clip_w = g->clip_w;
 		}
+		else
+			g->clip_w = fmaxf(0.1, fminf( 1.0 - g->clip_x, widget_value / (float)procw) );
 	}
-	fprintf(stderr, "out widget_value %f, prev x = %f, x = %f, prev w = %f, w = %f \n", widget_value, g->prev_clip_x * procw, g->clip_x* procw, g->prev_clip_w * procw, g->clip_w * procw);
 
 	if (widget == g->W_clip_x)
 	{
@@ -1916,19 +1931,35 @@ static void _numcrop_sz_changed(GtkSpinButton *widget, gpointer user_data)
 	// Vertical
 	if (widget == g->W_clip_h)
 	{
-		g->clip_h = fmaxf(0.1, fminf( 1.0 - g->clip_y, widget_value/(float)proch));
-
 		if (keep_centered)
-		{
-			g->clip_y = g->clip_y + (g->prev_clip_h - g->clip_h ) / 2.0;
-			if (g->clip_y < 0.0)
-			{
-				g->clip_y = 0;
-				g->clip_h = 2.0*g->prev_clip_y + g->prev_clip_h ;
-			}
-			g->prev_clip_y = g->clip_y;
-			g->prev_clip_h = g->clip_h;
-		}
+				{
+					float clip_unclamped;
+					clip_unclamped = widget_value / (float)proch;
+
+					if ( clip_unclamped > (1-g->clip_y) )
+					{
+						// In this case, it is necessary to detect if bottom edge was clamped to 1. In this case we must also move top edge to the top to keep center at the same location
+						clip_unclamped = g->prev_clip_h + 2.0 * (1.0 - ( g->clip_y + g->prev_clip_h) );
+					}
+					else if (clip_unclamped < 0.1 )
+					{
+						clip_unclamped = 0.1;
+					}
+
+					g->clip_h = clip_unclamped;
+
+					g->clip_y = g->clip_y + (g->prev_clip_h - g->clip_h ) * 0.5;
+
+					if (g->clip_y < 0.0)
+					{
+						g->clip_y = 0;
+						g->clip_h = 2.0 *g->prev_clip_y + g->prev_clip_h ;
+					}
+					g->prev_clip_y = g->clip_y;
+					g->prev_clip_h = g->clip_h;
+				}
+				else
+					g->clip_h = fmaxf(0.1, fminf( 1.0 - g->clip_y, widget_value / (float)proch) );
 	}
 
 	if (widget == g->W_clip_y)

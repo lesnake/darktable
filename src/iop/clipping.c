@@ -2292,6 +2292,9 @@ void gui_init(struct dt_iop_module_t *self)
 
 	g_signal_connect(G_OBJECT(g->numcrop_toggle), "toggled", G_CALLBACK(_numcrop_button_changed),  (gpointer)self);
 
+	if (g->clip_x != 1.0 ||g->clip_y != 1.0 ||g->clip_w != 1.0 ||g->clip_h != 1.0)
+		commit_box(self, g, p);
+
 }
 
 static void free_aspect(gpointer data)
